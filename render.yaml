@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: gimini-xauusd-review
+    runtime: python
+    plan: free
+    region: virginia
+    repo: https://github.com/ynkkxxz-max/Gimini
+    branch: main
+    buildCommand: python -m unittest discover -s tests -v
+    startCommand: python -u gemini_review_server.py
+    healthCheckPath: /healthz
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.5-flash-lite
+      - key: TRADINGVIEW_WEBHOOK_TOKEN
+        generateValue: true

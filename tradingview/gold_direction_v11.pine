@@ -1,0 +1,390 @@
+//@version=6
+// V11: closed-bar PREP labels and JSON review alerts; complete V8 trade engine.
+// WATCH rules affect observation markers only, never simulated entries or exits.
+// Costs are placeholders. All order and signal mutations require a confirmed bar.
+strategy("Gold Direction V11 | PREP + Filtered WATCH", overlay=true, max_labels_count=500, dynamic_requests=true, initial_capital=10000, currency=currency.USD, default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=0, commission_type=strategy.commission.percent, commission_value=0.005, slippage=20, process_orders_on_close=false, calc_on_every_tick=true, calc_on_order_fills=false)
+
+// Shared closed-bar signal engine. Dashboard lower-TF rows never drive entries.
+gTrend = "1. Direction"
+isBalanced = input.bool(false, "More frequent entries (Balanced, experimental)", group=gTrend)
+signalMode = isBalanced ? "Balanced" : "Strict V7"
+requireHigher = true
+requireEMA200 = input.bool(false, "Also require EMA50 / EMA200 trend alignment (stricter)", group=gTrend)
+minADX = isBalanced ? 16.0 : 20.0
+diGap = isBalanced ? 1.0 : 3.0
+minEmaGap = isBalanced ? 0.05 : 0.10
+
+gEntry = "2. Entry setup"
+entryMode = input.string("Pullback + first breakout", "Entry mode", options=["Pullback only", "Pullback + first breakout"], group=gEntry)
+pullbackBars = input.int(6, "Pullback expires after bars", minval=1, maxval=30, group=gEntry)
+breakLen = input.int(8, "First breakout lookback", minval=3, maxval=50, group=gEntry)
+breakBuffer = input.float(0.05, "Break buffer (ATR)", minval=0, step=0.05, group=gEntry)
+bodyATR = isBalanced ? 0.25 : 0.30
+closeLocation = isBalanced ? 0.60 : 0.65
+maxExtension = input.float(1.50, "Maximum EMA20 distance (ATR)", minval=0.25, step=0.25, group=gEntry)
+maxRangeATR = input.float(2.50, "Maximum candle range (ATR)", minval=1, step=0.25, group=gEntry)
+balancedSpacing = input.int(3, "Balanced: minimum bars between setups", minval=1, maxval=30, group=gEntry)
+cooldown = isBalanced ? balancedSpacing : 8
+useVolume = input.bool(false, "Require above-average volume", group=gEntry)
+volumeMult = input.float(1.10, "Volume multiplier", minval=0.5, step=0.1, group=gEntry)
+
+gDisplay = "3. Display"
+showWatch = input.bool(true, "Show trend-aligned WATCH diamonds (observation only)", group=gDisplay)
+watchMode = input.string("First per trend", "WATCH frequency", options=["First per trend", "Spaced pullbacks"], group=gDisplay)
+watchSpacing = input.int(12, "Minimum bars between WATCH diamonds", minval=1, maxval=100, group=gDisplay)
+watchResetBars = input.int(4, "Neutral closed bars before resetting WATCH trend", minval=1, maxval=20, group=gDisplay)
+maxWatchLabels = input.int(12, "Keep only the latest WATCH diamonds", minval=1, maxval=100, group=gDisplay)
+showLevels = input.bool(true, "Show actual simulated position SL / TP", group=gDisplay)
+showStats = input.bool(true, "Show Strategy stats at bottom-left", group=gDisplay)
+showEntryLabels = input.bool(true, "BUY / SELL labels for simulated order placement", group=gDisplay)
+showEMAs = input.bool(true, "Show EMA20 / EMA50 / EMA200", group=gDisplay)
+showPanel = input.bool(true, "Show 4H / 1H / 15m direction table", group=gDisplay)
+showBackground = input.bool(false, "Tint background by confirmed chart plan", group=gDisplay)
+
+gPrep = "5. Preparation signals"
+showPrep = input.bool(true, "Show PREP labels before a possible entry", group=gPrep)
+showPrepTrigger = input.bool(true, "Show active PREP trigger price", group=gPrep)
+prepSpacing = input.int(8, "Minimum bars between PREP labels", minval=1, maxval=100, group=gPrep)
+maxPrepLabels = input.int(12, "Keep only the latest PREP labels", minval=1, maxval=100, group=gPrep)
+gAI = "6. External Gemini review"
+enableAIAlerts = input.bool(true, "Enable JSON PREP / ENTRY alerts for external review", group=gAI)
+
+chartSeconds = timeframe.in_seconds()
+if barstate.isfirst
+    if not chart.is_standard
+        runtime.error("Use standard candles. Synthetic chart prices are not supported.")
+    if chartSeconds != 900 and chartSeconds != 3600 and chartSeconds != 14400
+        runtime.error("Use a 15-minute, 1-hour or 4-hour chart for Gold Direction V11.")
+
+// Same calculation in each requested context. No barstate flags inside requests.
+f_snapshot() =>
+    fast = ta.ema(close, 20)
+    slow = ta.ema(close, 50)
+    longEma = ta.ema(close, 200)
+    a = ta.atr(14)
+    [p, m, dx] = ta.dmi(14, 14)
+    enough = bar_index >= 199 and not na(a) and a > 0 and not na(dx)
+    separated = math.abs(fast - slow) >= a * minEmaGap
+    up = enough and separated and dx >= minADX and p - m >= diGap and close > slow and fast > slow and slow > slow[3] and (not requireEMA200 or slow > longEma)
+    down = enough and separated and dx >= minADX and m - p >= diGap and close < slow and fast < slow and slow < slow[3] and (not requireEMA200 or slow < longEma)
+    d = up ? 1 : down ? -1 : 0
+    [d, dx, time_close, enough]
+
+f_previous() =>
+    [d, a, t, r] = f_snapshot()
+    [d[1], a[1], t[1], r[1]]
+
+// Each static call below owns its own cache. Zero means WAIT, not stale BUY/SELL.
+f_row(string tf) =>
+    var int cachedDirection = 0
+    var float cachedAdx = na
+    var int cachedClose = na
+    var bool cachedReady = false
+    targetSeconds = timeframe.in_seconds(tf)
+    if targetSeconds > timeframe.in_seconds()
+        [d, a, t, r] = request.security(syminfo.tickerid, tf, f_previous(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+        cachedDirection := d
+        cachedAdx := a
+        cachedClose := t
+        cachedReady := r
+    else if targetSeconds == timeframe.in_seconds()
+        [d, a, t, r] = f_snapshot()
+        if barstate.isconfirmed
+            cachedDirection := d
+            cachedAdx := a
+            cachedClose := t
+            cachedReady := r
+    else
+        [directions, adxValues, closes, readyValues] = request.security_lower_tf(syminfo.tickerid, tf, f_snapshot())
+        cutoff = barstate.isrealtime ? math.min(timenow, time_close) : time_close
+        n = array.size(closes)
+        if n > 0
+            for i = 0 to n - 1
+                closedAt = array.get(closes, i)
+                if not na(closedAt) and closedAt <= cutoff
+                    cachedDirection := array.get(directions, i)
+                    cachedAdx := array.get(adxValues, i)
+                    cachedClose := closedAt
+                    cachedReady := array.get(readyValues, i)
+    [cachedDirection, cachedAdx, cachedClose, cachedReady]
+
+[d15, a15, t15, r15] = f_row("15")
+[d60, a60, t60, r60] = f_row("60")
+[d240, a240, t240, r240] = f_row("240")
+[rawBias, chartADX, chartClosedAt, chartReady] = f_snapshot()
+ema20 = ta.ema(close, 20)
+ema50 = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+atr = ta.atr(14)
+avgVolume = ta.sma(volume, 20)
+volumeOK = not useVolume or (not na(volume) and not na(avgVolume) and volume > avgVolume * volumeMult)
+
+// Strict preserves V7 defaults. Balanced permits neutral (but not opposite) nearest HTF.
+// Readiness is required: missing data must never be treated as permission to trade.
+strictLong = chartSeconds == 900 ? r60 and r240 and d60 == 1 and d240 == 1 : chartSeconds == 3600 ? r240 and d240 == 1 : true
+strictShort = chartSeconds == 900 ? r60 and r240 and d60 == -1 and d240 == -1 : chartSeconds == 3600 ? r240 and d240 == -1 : true
+balancedLong = chartSeconds == 900 ? r60 and r240 and d60 != -1 : chartSeconds == 3600 ? r240 and d240 != -1 : true
+balancedShort = chartSeconds == 900 ? r60 and r240 and d60 != 1 : chartSeconds == 3600 ? r240 and d240 != 1 : true
+longHigher = isBalanced ? balancedLong : strictLong
+shortHigher = isBalanced ? balancedShort : strictShort
+planNow = rawBias == 1 and (not requireHigher or longHigher) ? 1 : rawBias == -1 and (not requireHigher or shortHigher) ? -1 : 0
+
+var int chartBias = 0
+var int chartPlan = 0
+biasBuyTurn = barstate.isconfirmed and chartReady and planNow == 1 and chartPlan != 1
+biasSellTurn = barstate.isconfirmed and chartReady and planNow == -1 and chartPlan != -1
+var bool longBreakConsumed = false
+var bool shortBreakConsumed = false
+if barstate.isconfirmed
+    if planNow != 1
+        longBreakConsumed := false
+    if planNow != -1
+        shortBreakConsumed := false
+
+// A prior CLOSED pullback supplies a fixed trigger. Consume its first close breach.
+var int longSetupBar = na
+var int shortSetupBar = na
+var float longTrigger = na
+var float shortTrigger = na
+if barstate.isconfirmed
+    if planNow != 1 or close < ema50 or (not na(longSetupBar) and bar_index - longSetupBar > pullbackBars)
+        longSetupBar := na
+        longTrigger := na
+    if planNow != -1 or close > ema50 or (not na(shortSetupBar) and bar_index - shortSetupBar > pullbackBars)
+        shortSetupBar := na
+        shortTrigger := na
+pullbackBuyBreak = barstate.isconfirmed and not na(longSetupBar) and bar_index > longSetupBar and close > longTrigger
+pullbackSellBreak = barstate.isconfirmed and not na(shortSetupBar) and bar_index > shortSetupBar and close < shortTrigger
+previousHigh = ta.highest(high[1], breakLen)
+previousLow = ta.lowest(low[1], breakLen)
+firstBuyBreak = entryMode == "Pullback + first breakout" and barstate.isconfirmed and planNow == 1 and not longBreakConsumed and close > previousHigh + atr * breakBuffer
+firstSellBreak = entryMode == "Pullback + first breakout" and barstate.isconfirmed and planNow == -1 and not shortBreakConsumed and close < previousLow - atr * breakBuffer
+
+candleRange = math.max(high - low, syminfo.mintick)
+body = math.abs(close - open)
+normalRange = candleRange <= atr * maxRangeATR
+buyMomentum = close > open and body >= atr * bodyATR and (close - low) / candleRange >= closeLocation and close > ema20
+sellMomentum = close < open and body >= atr * bodyATR and (high - close) / candleRange >= closeLocation and close < ema20
+buyNotExtended = close - ema20 <= atr * maxExtension
+sellNotExtended = ema20 - close <= atr * maxExtension
+var int lastSignalBar = na
+canSignal = na(lastSignalBar) or bar_index - lastSignalBar >= cooldown
+buySignal = barstate.isconfirmed and chartReady and planNow == 1 and volumeOK and normalRange and buyMomentum and buyNotExtended and canSignal and (pullbackBuyBreak or firstBuyBreak)
+sellSignal = barstate.isconfirmed and chartReady and planNow == -1 and volumeOK and normalRange and sellMomentum and sellNotExtended and canSignal and (pullbackSellBreak or firstSellBreak)
+var string lastEntry = "No entry setup in loaded history"
+if buySignal or sellSignal
+    lastSignalBar := bar_index
+    lastEntry := (buySignal ? "BUY " : "SELL ") + str.format_time(time_close, "MM-dd HH:mm", syminfo.timezone)
+
+// Breached setups are not retried later merely because a filter improves.
+if barstate.isconfirmed
+    if firstBuyBreak
+        longBreakConsumed := true
+    if firstSellBreak
+        shortBreakConsumed := true
+    if pullbackBuyBreak or buySignal
+        longSetupBar := na
+        longTrigger := na
+    if pullbackSellBreak or sellSignal
+        shortSetupBar := na
+        shortTrigger := na
+    // Evaluate signals BEFORE arming today's pullback; no self-qualified entry.
+    if planNow == 1 and not buySignal and not pullbackBuyBreak and low <= ema20 + atr * 0.10 and low >= ema50 - atr * 0.25 and close >= ema50
+        longSetupBar := bar_index
+        longTrigger := high + atr * breakBuffer
+    if planNow == -1 and not sellSignal and not pullbackSellBreak and high >= ema20 - atr * 0.10 and high <= ema50 + atr * 0.25 and close <= ema50
+        shortSetupBar := bar_index
+        shortTrigger := low - atr * breakBuffer
+    chartBias := rawBias
+    chartPlan := planNow
+
+var string planReason = "WAIT: loading history"
+if barstate.isconfirmed
+    planReason := not chartReady ? "WAIT: need 200 chart bars" : rawBias == 0 ? "WAIT: local trend / ADX / DI mixed" : planNow == 0 ? "WAIT: higher timeframes disagree" : not volumeOK ? "WAIT: volume filter" : not normalRange ? "WAIT: candle too large" : (planNow == 1 and not buyNotExtended) or (planNow == -1 and not sellNotExtended) ? "WAIT: price extended from EMA20" : not canSignal ? "WAIT: entry cooldown" : planNow == 1 and not na(longTrigger) ? "ARMED: close above " + str.tostring(longTrigger, format.mintick) : planNow == -1 and not na(shortTrigger) ? "ARMED: close below " + str.tostring(shortTrigger, format.mintick) : "Bias only: wait for an entry setup"
+
+
+// WATCH: same closed-bar direction and higher-timeframe agreement as the plan.
+// A confirmed EMA20 reclaim or pullback rejection is required; never backdated.
+crossAbove20 = ta.crossover(close, ema20)
+crossBelow20 = ta.crossunder(close, ema20)
+var int watchTrend = 0
+var int watchNeutralCount = 0
+var bool watchUsed = false
+var int lastWatchBar = na
+if barstate.isconfirmed
+    if planNow == 0
+        watchNeutralCount += 1
+        if watchNeutralCount >= watchResetBars
+            watchTrend := 0
+            watchUsed := false
+    else
+        watchNeutralCount := 0
+        if planNow != watchTrend
+            watchTrend := planNow
+            watchUsed := false
+watchSpacingOK = na(lastWatchBar) or bar_index - lastWatchBar >= watchSpacing
+watchFrequencyOK = watchMode == "Spaced pullbacks" or not watchUsed
+watchCommon = barstate.isconfirmed and chartReady and watchSpacingOK and watchFrequencyOK and volumeOK and normalRange
+watchBuySetup = (crossAbove20 or (low <= ema20 + atr * 0.10 and close > high[1])) and close > ema20 and close > open and body >= atr * 0.20 and (close - low) / candleRange >= 0.60 and close - ema20 <= atr
+watchSellSetup = (crossBelow20 or (high >= ema20 - atr * 0.10 and close < low[1])) and close < ema20 and close < open and body >= atr * 0.20 and (high - close) / candleRange >= 0.60 and ema20 - close <= atr
+watchBuy = watchCommon and planNow == 1 and watchBuySetup
+watchSell = watchCommon and planNow == -1 and watchSellSetup
+
+gTest = "4. Strategy simulation"
+testStart = input.time(timestamp("01 Jan 2025 00:00 +0000"), "Entry start (UTC)", group=gTest)
+testEnd = input.time(timestamp("01 Jan 2030 00:00 +0000"), "Entry end (UTC)", group=gTest)
+stopATR = input.float(1.5, "Stop / signal ATR", minval=0.25, step=0.25, group=gTest)
+rewardRisk = input.float(2.0, "Target / stop distance", minval=0.5, step=0.25, group=gTest)
+maxHoldHours = input.float(12.0, "Close-checked holding hours (0 = off)", minval=0, step=1, group=gTest)
+closeOnOpposite = input.bool(true, "Close on opposite confirmed setup", group=gTest)
+if barstate.isfirst and testStart >= testEnd
+    runtime.error("Entry start must be before the end date.")
+inTest = time >= testStart and time_close < testEnd
+enterLong = buySignal and inTest and strategy.position_size == 0
+enterShort = sellSignal and inTest and strategy.position_size == 0
+watchBuyDraw = inTest and watchBuy and not enterLong
+watchSellDraw = inTest and watchSell and not enterShort
+var int watchCount = 0
+if watchBuyDraw or watchSellDraw
+    lastWatchBar := bar_index
+    watchUsed := true
+    watchCount += 1
+// PREP refers to an actually armed, unbreached trigger in this trade engine.
+// It is not an entry, a forecast, or a claim about the probability of a win.
+prepLong = barstate.isconfirmed and chartReady and inTest and strategy.position_size == 0 and planNow == 1 and volumeOK and normalRange and buyNotExtended and canSignal and not buySignal and not sellSignal and not na(longTrigger) and close <= longTrigger
+prepShort = barstate.isconfirmed and chartReady and inTest and strategy.position_size == 0 and planNow == -1 and volumeOK and normalRange and sellNotExtended and canSignal and not buySignal and not sellSignal and not na(shortTrigger) and close >= shortTrigger
+prepDirection = prepLong ? 1 : prepShort ? -1 : 0
+var int lastPrepDirection = 0
+var int lastPrepBar = na
+prepSpacingOK = na(lastPrepBar) or bar_index - lastPrepBar >= prepSpacing
+prepEvent = prepDirection != 0 and prepDirection != lastPrepDirection and prepSpacingOK
+var int prepCount = 0
+if barstate.isconfirmed
+    if prepEvent
+        lastPrepBar := bar_index
+        prepCount += 1
+    // A suppressed event stays eligible until its spacing gate opens.
+    if prepDirection == 0 or prepEvent
+        lastPrepDirection := prepDirection
+var float activePrepTrigger = na
+var int activePrepDirection = 0
+if barstate.isconfirmed
+    activePrepDirection := prepDirection
+    activePrepTrigger := prepLong ? longTrigger : prepShort ? shortTrigger : na
+
+counterLong = chartSeconds < 14400 and r240 and d240 == -1
+counterShort = chartSeconds < 14400 and r240 and d240 == 1
+var bool positionWasCounter = false
+var int activeStopTicks = na
+var int activeTargetTicks = na
+var string lastOrder = "No simulated order in loaded history"
+if barstate.isconfirmed and (enterLong or enterShort)
+    activeStopTicks := int(math.max(1, math.round(atr * stopATR / syminfo.mintick)))
+    activeTargetTicks := int(math.max(1, math.round(activeStopTicks * rewardRisk)))
+    positionWasCounter := enterLong ? counterLong : counterShort
+    lastOrder := (enterLong ? "BUY" : "SELL") + (positionWasCounter ? " CT " : " ") + str.format_time(time_close, "MM-dd HH:mm", syminfo.timezone)
+    if enterLong
+        strategy.entry("BUY", strategy.long, comment=counterLong ? "BUY CT" : "BUY")
+        strategy.exit("BUY SL/TP", from_entry="BUY", loss=activeStopTicks, profit=activeTargetTicks)
+    else
+        strategy.entry("SELL", strategy.short, comment=counterShort ? "SELL CT" : "SELL")
+        strategy.exit("SELL SL/TP", from_entry="SELL", loss=activeStopTicks, profit=activeTargetTicks)
+
+int entryTime = strategy.opentrades > 0 ? strategy.opentrades.entry_time(0) : na
+timeExit = maxHoldHours > 0 and not na(entryTime) and time_close - entryTime >= maxHoldHours * 3600000
+if barstate.isconfirmed
+    if strategy.position_size > 0 and (not inTest or timeExit or (closeOnOpposite and sellSignal))
+        strategy.close("BUY", comment="Date / time / opposite exit")
+    if strategy.position_size < 0 and (not inTest or timeExit or (closeOnOpposite and buySignal))
+        strategy.close("SELL", comment="Date / time / opposite exit")
+
+// Stops are attached at order creation. These guides use the actual simulated fill.
+stopPrice = strategy.position_size > 0 ? strategy.position_avg_price - activeStopTicks * syminfo.mintick : strategy.position_size < 0 ? strategy.position_avg_price + activeStopTicks * syminfo.mintick : na
+targetPrice = strategy.position_size > 0 ? strategy.position_avg_price + activeTargetTicks * syminfo.mintick : strategy.position_size < 0 ? strategy.position_avg_price - activeTargetTicks * syminfo.mintick : na
+buyColor = color.rgb(35, 105, 255)
+sellColor = color.rgb(230, 50, 65)
+f_color(int d) =>
+    d == 1 ? color.rgb(35, 105, 255) : d == -1 ? color.rgb(230, 50, 65) : color.rgb(90, 90, 100)
+f_name(int d, bool ready, int closedAt) =>
+    na(closedAt) ? "NO DATA" : not ready ? "WARMUP" : d == 1 ? "BUY BIAS" : d == -1 ? "SELL BIAS" : "WAIT"
+f_drawRow(table panel, int row, string tfName, int d, float dx, int closedAt, bool ready) =>
+    table.cell(panel, 0, row, tfName, bgcolor=color.rgb(30, 33, 40), text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, row, f_name(d, ready, closedAt), bgcolor=f_color(d), text_color=color.white, text_size=size.small)
+    table.cell(panel, 2, row, str.tostring(dx, "#.0"), bgcolor=color.rgb(30, 33, 40), text_color=color.white, text_size=size.small)
+    table.cell(panel, 3, row, na(closedAt) ? "-" : str.format_time(closedAt, "MM-dd HH:mm", syminfo.timezone), bgcolor=color.rgb(30, 33, 40), text_color=color.silver, text_size=size.small)
+
+plot(showEMAs ? ema20 : na, "EMA20", color=color.new(buyColor, 20))
+plot(showEMAs ? ema50 : na, "EMA50", color=color.yellow)
+plot(showEMAs ? ema200 : na, "EMA200", color=color.gray, linewidth=2)
+plot(showLevels ? stopPrice : na, "Position SL", color=sellColor, linewidth=2, style=plot.style_linebr)
+plot(showLevels ? targetPrice : na, "Position TP", color=color.lime, linewidth=2, style=plot.style_linebr)
+var array<label> prepLabels = array.new<label>()
+if showPrep and prepEvent
+    prepPrice = prepLong ? longTrigger : shortTrigger
+    prepLabel = label.new(bar_index, prepLong ? low - atr * 0.65 : high + atr * 0.65, (prepLong ? "PREP BUY" : "PREP SELL") + "\n" + str.tostring(prepPrice, format.mintick), style=prepLong ? label.style_label_up : label.style_label_down, color=color.rgb(165, 108, 20), textcolor=color.white, size=size.tiny, tooltip="Armed setup on a closed bar. A later close must breach the trigger and pass entry filters. Setup expires or cancels if trend/price invalidates it. Not an entry.")
+    array.push(prepLabels, prepLabel)
+    if array.size(prepLabels) > maxPrepLabels
+        label.delete(array.shift(prepLabels))
+plot(showPrepTrigger ? activePrepTrigger : na, "PREP trigger (await confirmation)", color=color.orange, linewidth=2, style=plot.style_linebr)
+// Limit only our WATCH labels; preserve every strategy order and its statistics.
+var array<label> watchLabels = array.new<label>()
+if showWatch and (watchBuyDraw or watchSellDraw)
+    watchLabel = label.new(bar_index, watchBuyDraw ? low - atr * 0.20 : high + atr * 0.20, "", xloc=xloc.bar_index, yloc=yloc.price, color=watchBuyDraw ? buyColor : sellColor, style=label.style_diamond, size=size.tiny, tooltip=(watchBuyDraw ? "BUY WATCH" : "SELL WATCH") + " | closed-bar pullback | aligned with confirmed plan | observation only")
+    array.push(watchLabels, watchLabel)
+    if array.size(watchLabels) > maxWatchLabels
+        label.delete(array.shift(watchLabels))
+plotshape(showEntryLabels and enterLong and not counterLong, title="BUY order placement", text="BUY", style=shape.labelup, location=location.belowbar, color=buyColor, textcolor=color.white, size=size.small)
+plotshape(showEntryLabels and enterLong and counterLong, title="BUY CT order placement", text="BUY CT", style=shape.labelup, location=location.belowbar, color=buyColor, textcolor=color.white, size=size.small)
+plotshape(showEntryLabels and enterShort and not counterShort, title="SELL order placement", text="SELL", style=shape.labeldown, location=location.abovebar, color=sellColor, textcolor=color.white, size=size.small)
+plotshape(showEntryLabels and enterShort and counterShort, title="SELL CT order placement", text="SELL CT", style=shape.labeldown, location=location.abovebar, color=sellColor, textcolor=color.white, size=size.small)
+plot(chartPlan, "Confirmed chart plan: +1 / 0 / -1", display=display.data_window)
+bgcolor(showBackground ? color.new(f_color(chartPlan), 94) : na)
+
+// Alerts are one-way: Gemini reviews on the server, never inside Pine backtests.
+f_num(float n) =>
+    na(n) ? "null" : str.tostring(n, "#.########")
+f_json(string eventName, string sideName, float triggerPrice) =>
+    "{\"schema\":\"gold-setup-v1\",\"event\":\"" + eventName + "\",\"side\":\"" + sideName + "\",\"ticker\":\"" + syminfo.tickerid + "\",\"timeframe\":\"" + timeframe.period + "\",\"closed_at\":" + str.tostring(time_close) + ",\"open\":" + f_num(open) + ",\"high\":" + f_num(high) + ",\"low\":" + f_num(low) + ",\"price\":" + f_num(close) + ",\"atr\":" + f_num(atr) + ",\"adx\":" + f_num(chartADX) + ",\"ema20\":" + f_num(ema20) + ",\"ema50\":" + f_num(ema50) + ",\"ema200\":" + f_num(ema200) + ",\"bias15\":" + str.tostring(d15) + ",\"bias60\":" + str.tostring(d60) + ",\"bias240\":" + str.tostring(d240) + ",\"trigger\":" + f_num(triggerPrice) + ",\"stop_atr\":" + f_num(stopATR) + ",\"reward_risk\":" + f_num(rewardRisk) + "}"
+if enableAIAlerts and barstate.isconfirmed
+    if enterLong or enterShort
+        alert(f_json("ENTRY", enterLong ? "BUY" : "SELL", close), alert.freq_once_per_bar_close)
+    else if prepEvent
+        alert(f_json("PREP", prepLong ? "BUY" : "SELL", prepLong ? longTrigger : shortTrigger), alert.freq_once_per_bar_close)
+
+// Closed-trade statistics come from the broker emulator, never from WATCH counts.
+closedCount = strategy.closedtrades
+winText = closedCount > 0 ? str.tostring(100.0 * strategy.wintrades / closedCount, "#.0") + "%" : "-"
+grossLoss = math.abs(strategy.grossloss)
+pfText = grossLoss > 0 ? str.tostring(strategy.grossprofit / grossLoss, "#.00") : strategy.grossprofit > 0 ? "NO LOSS YET" : "-"
+positionText = enterLong ? "BUY ORDER PENDING" : enterShort ? "SELL ORDER PENDING" : strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+positionText := positionText + ((strategy.position_size != 0 or enterLong or enterShort) and positionWasCounter ? " CT" : "")
+stopText = na(stopPrice) ? "-" : str.tostring(stopPrice, format.mintick)
+targetText = na(targetPrice) ? "-" : str.tostring(targetPrice, format.mintick)
+statusText = enterLong or enterShort ? "SIMULATED ORDER PLACED: next-tick fill" : activePrepDirection != 0 ? "PREP " + (activePrepDirection == 1 ? "BUY: close above " : "SELL: close below ") + str.tostring(activePrepTrigger, format.mintick) : planReason
+planCounter = chartPlan == 1 ? counterLong : chartPlan == -1 ? counterShort : false
+var table dashboard = table.new(position.top_right, 4, 11, border_width=1)
+var table statsPanel = table.new(position.bottom_left, 1, 3, border_width=1)
+if barstate.isfirst
+    table.merge_cells(dashboard, 0, 0, 3, 0)
+    for row = 5 to 10
+        table.merge_cells(dashboard, 0, row, 3, row)
+if barstate.islast and showPanel
+    table.cell(dashboard, 0, 0, "GOLD V11 | " + signalMode + " | ADX " + str.tostring(minADX) + " | spacing " + str.tostring(cooldown), bgcolor=color.black, text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 0, 1, "TF", bgcolor=color.black, text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 1, "CLOSED BIAS", bgcolor=color.black, text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 2, 1, "ADX", bgcolor=color.black, text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 3, 1, syminfo.timezone, bgcolor=color.black, text_color=color.white, text_size=size.small)
+    f_drawRow(dashboard, 2, "4H", d240, a240, t240, r240)
+    f_drawRow(dashboard, 3, "1H", d60, a60, t60, r60)
+    f_drawRow(dashboard, 4, "15m", d15, a15, t15, r15)
+    table.cell(dashboard, 0, 5, "CHART " + timeframe.period + ": " + (chartPlan == 1 ? "BUY BIAS" : chartPlan == -1 ? "SELL BIAS" : "WAIT") + (planCounter ? " CT" : ""), bgcolor=f_color(chartPlan), text_color=color.white)
+    table.cell(dashboard, 0, 6, statusText, bgcolor=color.black, text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 0, 7, strategy.position_size != 0 ? "SL " + stopText + " | TP " + targetText : "Last order: " + lastOrder, bgcolor=color.black, text_color=color.silver, text_size=size.small)
+    table.cell(dashboard, 0, 8, "WATCH " + str.tostring(array.size(watchLabels)) + "/" + str.tostring(maxWatchLabels) + " visible | " + str.tostring(watchCount) + " total | observation only", bgcolor=color.black, text_color=color.silver, text_size=size.small)
+    table.cell(dashboard, 0, 9, "PREP " + str.tostring(array.size(prepLabels)) + " visible | " + str.tostring(prepCount) + " total | not an entry", bgcolor=color.rgb(65, 47, 22), text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 0, 10, "Gemini: external review only; not part of backtest", bgcolor=color.black, text_color=color.silver, text_size=size.small)
+if barstate.islast and showStats
+    table.cell(statsPanel, 0, 0, "STRATEGY " + signalMode + " | " + positionText, bgcolor=color.rgb(30, 33, 40), text_color=color.white, text_size=size.small)
+    table.cell(statsPanel, 0, 1, "CLOSED " + str.tostring(closedCount) + " | WIN " + winText + " | PF " + pfText, bgcolor=color.black, text_color=color.white, text_size=size.small)
+    table.cell(statsPanel, 0, 2, "NET " + str.tostring(strategy.netprofit, "#.00") + " USD | MAX DD " + str.tostring(strategy.max_drawdown, "#.00") + " USD", bgcolor=color.black, text_color=strategy.netprofit >= 0 ? color.lime : color.red, text_size=size.small)
+

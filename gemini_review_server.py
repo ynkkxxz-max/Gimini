@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from tradingview_gemini_bridge import api_key, get_bridge, handle_tradingview, webhook_token
+from manual_review import handle_manual, manual_page
 
 
 def dashboard():
@@ -39,6 +40,21 @@ class ReviewHandler(BaseHTTPRequestHandler):
         self.connection.settimeout(10)
 
     def do_GET(self):
+        if self.path in ('/', '/manual'):
+            body = manual_page()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Referrer-Policy', 'no-referrer')
+            self.send_header('X-Frame-Options', 'DENY')
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            self.send_header('Content-Security-Policy', "default-src 'self'; img-src 'self' blob: data:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if handle_manual(self):
+            return
         token = webhook_token()
         if self.path.startswith('/review/'):
             if not token or not hmac.compare_digest(self.path.encode(), ('/review/' + token).encode()):
@@ -56,10 +72,10 @@ class ReviewHandler(BaseHTTPRequestHandler):
             return
         if handle_tradingview(self):
             return
-        if self.path not in ('/', '/healthz'):
+        if self.path != '/healthz':
             self.send_error(404)
             return
-        body = json.dumps({'service': 'XAUUSD Gemini setup review', 'version': 'v11',
+        body = json.dumps({'service': 'XAUUSD Gemini setup review', 'version': 'v12-manual',
                            'configured': bool(api_key()), 'places_orders': False}).encode()
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
@@ -68,10 +84,12 @@ class ReviewHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_HEAD(self):
-        self.send_response(200 if self.path in ('/', '/healthz') else 404)
+        self.send_response(200 if self.path in ('/', '/manual', '/healthz') else 404)
         self.end_headers()
 
     def do_POST(self):
+        if handle_manual(self):
+            return
         if not handle_tradingview(self):
             self.send_error(404)
 

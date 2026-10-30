@@ -1,38 +1,67 @@
-# Free standalone Gemini review service
+# Gimini XAUUSD manual chart review
 
-Use `gemini_review_server.py` together with `tradingview_gemini_bridge.py`.
-Both files use Python's standard library only. The standalone server never
-imports the Telegram bot and never executes trades.
+Open the service root URL to review a TradingView screenshot or a written setup
+in Khmer. This mode works without a TradingView webhook subscription.
 
-Render configuration:
+1. Sign in using the Gemini API key configured on this service, or its private
+   `TRADINGVIEW_WEBHOOK_TOKEN`. Enter credentials only on your service's HTTPS
+   page; never put them in GitHub, chat, a screenshot, or a query string.
+2. Select a PNG/JPG/WebP chart (up to 5 MB), timeframe, proposed direction, and
+   chart time. Add a question or context. A written description of at least
+   20 characters can be used instead of an image.
+3. Click the Gemini review button. The page shows technical consistency,
+   Khmer reasons, risks, and missing information. `WAIT` means more evidence
+   is needed; `SETUP_CONSISTENT` is not an order to execute a trade.
 
-- Runtime: Python 3
-- Instance type: Free
-- Build command: `python -m py_compile gemini_review_server.py tradingview_gemini_bridge.py`
-- Start command: `python -u gemini_review_server.py`
-- Health check: `/healthz`
-- Environment: `GEMINI_API_KEY`, `GEMINI_MODEL` and `TRADINGVIEW_WEBHOOK_TOKEN`
-- Use a random token of at least 32 characters. Keep it and the key private.
+The image and supplied context are sent to Google Gemini only when submitted.
+Uploads are processed in memory and released after review; they are not saved
+as service files. The last 20 manual results are temporary and disappear on
+restart. The eight-hour login cookie is signed, HttpOnly, SameSite=Strict and
+Secure over HTTPS. The browser does not store the submitted API key. Requests
+require the same origin, authenticated access, and a 20-second submission gap.
 
-TradingView V11: create a strategy alert for **alert() function calls only**.
-Set its webhook to `https://SERVICE.onrender.com/api/tradingview/TOKEN`.
-Read Gemini's Khmer reviews at `https://SERVICE.onrender.com/review/TOKEN`.
-An authenticated GET to the webhook URL returns machine-readable reviews.
+## Render configuration
 
-TradingView requires 2FA for webhook alerts and plan restrictions may apply.
-Creating an alert saves a snapshot, so recreate it after a Pine script or
-input change. The service queues and acknowledges valid events before the
-Gemini API call. It does not send the API key to TradingView.
+Deploy the included `render.yaml`, using the existing Free service:
 
-Render Free services sleep when idle. Their cold start may exceed TradingView's
-three-second webhook timeout, so a Free service is not reliable low-latency
-trading infrastructure. No paid upgrade is required or authorized by this setup.
-Review history uses ephemeral SQLite and may be lost on redeploy.
+- Runtime: Python 3, standard library only
+- Build: `python -m unittest discover -s tests -v`
+- Start: `python -u gemini_review_server.py`
+- Health: `/healthz` (`v12-manual`, `configured: true` when a key is present)
+- `GEMINI_API_KEY`: set privately in Render
+- `GEMINI_MODEL`: `gemini-3.5-flash-lite`
+- `TRADINGVIEW_WEBHOOK_TOKEN`: generated private token, at least 32 characters
 
-Gemini reviews are not part of Pine backtests. A model opinion is not a
-measured win probability; no improvement to the strategy's win rate is claimed.
+Ship `manual.html`, `manual_review.py`, `gemini_review_server.py`, and
+`tradingview_gemini_bridge.py` together. Never run the separate Telegram bot
+as part of this service. No paid plan is required by this manual workflow.
 
-Sources:
-- https://render.com/docs/free
-- https://render.com/docs/web-services
-- https://www.tradingview.com/support/solutions/43000529348-how-to-configure-webhook-alerts/
+Free services can sleep when idle; the first visit may take time to open.
+Gemini API quota and billing are separate from Render's Free plan.
+
+## Optional TradingView webhook mode
+
+The existing V11 Pine file and protected webhook are retained. TradingView
+Basic blocked webhook alerts during setup, so no automatic alert is enabled.
+For an eligible account, create an alert for **alert() function calls only**:
+
+- Webhook: `https://SERVICE.onrender.com/api/tradingview/TOKEN`
+- Private review dashboard: `https://SERVICE.onrender.com/review/TOKEN`
+
+Keep these token-bearing URLs private. Recreate an alert after changing Pine
+code or inputs. Incoming events are queued before calling Gemini. Webhook
+history uses ephemeral SQLite and can disappear on redeploy; Free cold starts
+are unsuitable for dependable low-latency alerts.
+
+The service never places orders or changes Pine backtests. No improvement in
+strategy win rate is claimed, and AI output is not a measured win probability.
+
+## Validation
+
+Run `python -m unittest discover -s tests -v`. Tests cover authentication,
+origin checks, sessions, input validation, multimodal payload construction,
+queueing, failed-review handling, and the existing webhook behavior. Mocked
+test results are fixtures, not live Gemini predictions.
+
+Documentation: [Render Free](https://render.com/docs/free),
+[Gemini image input](https://ai.google.dev/gemini-api/docs/image-understanding).

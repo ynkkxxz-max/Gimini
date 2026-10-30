@@ -90,6 +90,10 @@ def event_id(snapshot):
 
 
 def review_with_gemini(snapshot):
+    return generate_review([{'text': json.dumps(snapshot, ensure_ascii=False, allow_nan=False)}], SYSTEM)
+
+
+def generate_review(parts, system_rules):
     key = api_key()
     if not key:
         raise RuntimeError('gemini_key_missing')
@@ -97,8 +101,8 @@ def review_with_gemini(snapshot):
     if not re.fullmatch(r'[A-Za-z0-9._-]+', model):
         raise RuntimeError('invalid_gemini_model')
     body = {
-        'systemInstruction': {'parts': [{'text': SYSTEM}]},
-        'contents': [{'role': 'user', 'parts': [{'text': json.dumps(snapshot, ensure_ascii=False, allow_nan=False)}]}],
+        'systemInstruction': {'parts': [{'text': system_rules}]},
+        'contents': [{'role': 'user', 'parts': parts}],
         'generationConfig': {'temperature': 0.1, 'maxOutputTokens': 2048,
                              'responseMimeType': 'application/json', 'responseSchema': SCHEMA},
     }

@@ -89,7 +89,7 @@ class BridgeTests(unittest.TestCase):
 
     def test_gemini_schema_and_model_output_validation(self):
         valid = dict(verdict='SETUP_CONSISTENT', reason_km='ទិសដៅស្របគ្នា។',
-                     risks_km=['ការប្រែប្រួលតម្លៃ។'], missing_data=['Economic calendar'])
+                     risks_km=['ការប្រែប្រួលតម្លៃ។'], missing_data=['កាលវិភាគព័ត៌មានសេដ្ឋកិច្ច។'])
         def response(value):
             return io.BytesIO(json.dumps({'candidates': [{'finishReason': 'STOP', 'content': {'parts': [{'text': json.dumps(value)}]}}]}).encode())
         with patch.dict(os.environ, {'GEMINI_API_KEY': 'test-key', 'GEMINI_MODEL': 'gemini-flash-latest'}):

@@ -27,7 +27,7 @@ Deploy the included `render.yaml`, using the existing Free service:
 - Runtime: Python 3, standard library only
 - Build: `python -m unittest discover -s tests -v`
 - Start: `python -u gemini_review_server.py`
-- Health: `/healthz` (`v14-khmer-repair`, `configured: true` when a key is present)
+- Health: `/healthz` (`v15-screenshot-signals`, `configured: true` when a key is present)
 - `GEMINI_API_KEY`: set privately in Render
 - `GEMINI_MODEL`: `gemini-3.5-flash-lite`
 - `TRADINGVIEW_WEBHOOK_TOKEN`: generated private token, at least 32 characters
@@ -57,6 +57,32 @@ The service never places orders or changes Pine backtests. No improvement in
 strategy win rate is claimed, and AI output is not a measured win probability.
 
 ## Validation
+
+### Screenshot signal screening
+
+Manual reviews include a BUY / SELL / WAIT card, chart bias, a checklist, and
+historical Strategy Tester statistics read from the uploaded image. Historical
+win rate is never presented as the next signal's probability of winning.
+
+The user's chosen historical win-rate filter defaults to 80%. The closed-trade
+sample filter defaults to 100 and is editable; this is a product screening
+threshold, not a statistically validated minimum. A signal also needs a readable
+chart, aligned visible higher-timeframe trends, an explicitly confirmed entry
+on a completed candle, known chart time, explicit entry/SL/TP for that same setup,
+reward/risk of at least 1.5, historical profit factor above 1, a consistent review,
+and no conflict with a user-selected direction. These are screening rules, not
+an optimized or validated profitable strategy. Missing information produces WAIT.
+
+Historical numbers are model-extracted from the screenshot and labelled as such,
+not independently verified against a trade ledger. Counts are checked for
+consistency; when both winning and closed-trade counts are readable, the server
+computes winning / closed * 100. If only a WIN percentage and closed-trade count
+are visible, the reported percentage is labelled as reported. No history is
+invented from trend strength or prose claims. Images without readable history
+show no win-rate number. Signals describe the uploaded image, not a live feed.
+Language editing preserves structured signal evidence and history unchanged.
+
+### Checks
 
 Every reason, risk, and missing-information item must contain Khmer prose.
 Thai characters and other foreign-script letters are rejected before displaying

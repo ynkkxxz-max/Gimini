@@ -122,8 +122,8 @@ def review_with_gemini(snapshot):
     return generate_review([{'text': json.dumps(snapshot, ensure_ascii=False, allow_nan=False)}], SYSTEM)
 
 
-def generate_review(parts, system_rules):
-    review = generate_once(parts, system_rules + '\n' + KHMER_RULES)
+def generate_review(parts, system_rules, response_schema=None):
+    review = generate_once(parts, system_rules + '\n' + KHMER_RULES, response_schema=response_schema)
     if is_khmer_review(review):
         return review
     return repair_khmer_review(review)
@@ -209,7 +209,7 @@ def generate_once(parts, system_rules, response_schema=None):
             raise ValueError('incomplete')
         text = ''.join(p.get('text', '') for p in candidate['content']['parts'] if not p.get('thought'))
         review = json.loads(text)
-        if set(review) != set(SCHEMA['required']) or review['verdict'] not in ('SETUP_CONSISTENT', 'WAIT'):
+        if set(review) != set((response_schema or SCHEMA)['required']) or review['verdict'] not in ('SETUP_CONSISTENT', 'WAIT'):
             raise ValueError('schema')
         if not isinstance(review['reason_km'], str) or not review['reason_km'].strip() or len(review['reason_km']) > 2000:
             raise ValueError('reason')

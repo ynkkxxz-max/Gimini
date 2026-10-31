@@ -27,7 +27,7 @@ Deploy the included `render.yaml`, using the existing Free service:
 - Runtime: Python 3, standard library only
 - Build: `python -m unittest discover -s tests -v`
 - Start: `python -u gemini_review_server.py`
-- Health: `/healthz` (`v12-manual`, `configured: true` when a key is present)
+- Health: `/healthz` (`v13-khmer`, `configured: true` when a key is present)
 - `GEMINI_API_KEY`: set privately in Render
 - `GEMINI_MODEL`: `gemini-3.5-flash-lite`
 - `TRADINGVIEW_WEBHOOK_TOKEN`: generated private token, at least 32 characters
@@ -57,6 +57,13 @@ The service never places orders or changes Pine backtests. No improvement in
 strategy win rate is claimed, and AI output is not a measured win probability.
 
 ## Validation
+
+Every reason, risk, and missing-information item must contain Khmer prose.
+Thai characters and other foreign-script letters are rejected before displaying
+the review. Gemini regenerates once from the original evidence using short
+Khmer sentences. If it fails again, the page shows a Khmer error instead of
+mixed-language text. ASCII technical labels such as BUY, SELL and EMA20 remain
+allowed. Script validation does not guarantee perfect Khmer grammar.
 
 Run `python -m unittest discover -s tests -v`. Tests cover authentication,
 origin checks, sessions, input validation, multimodal payload construction,

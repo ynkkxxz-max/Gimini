@@ -75,7 +75,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
         if self.path != '/healthz':
             self.send_error(404)
             return
-        body = json.dumps({'service': 'XAUUSD Gemini setup review', 'version': 'v12-manual',
+        body = json.dumps({'service': 'XAUUSD Gemini setup review', 'version': 'v13-khmer',
                            'configured': bool(api_key()), 'places_orders': False}).encode()
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')

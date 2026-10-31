@@ -9,6 +9,7 @@ import re
 import sqlite3
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
@@ -34,6 +35,34 @@ You have no economic calendar, order book, spread or subsequent candles; state t
 missing inputs. Give short clear Khmer reasons. Do not give a win probability,
 confidence percentage, profit guarantee, or an instruction to execute a trade.
 SETUP_CONSISTENT means only technical consistency, never a validated winning trade.'''
+
+KHMER_RULES = '''
+LANGUAGE REQUIREMENT: Every natural-language field (reason_km, every risks_km item,
+and every missing_data item) must be clear Cambodian Khmer written in Khmer script.
+Never use Thai or any other foreign-script characters inside Khmer words. Never copy Thai
+text from a chart or user message into the answer. Translate its meaning instead.
+Keep only useful technical labels such as BUY, SELL, EMA20, ADX, ATR, XAUUSD and
+timeframes in Latin script; explain them in Khmer. Do not add English translations.
+Use familiar, correct Khmer words and short sentences, not invented terminology.
+Keep reason_km to two short sentences, and each list item to one short sentence.
+សរសេរចម្លើយជាភាសាខ្មែរឱ្យច្បាស់ ងាយអាន និងខ្លី។ កុំលាយអក្សរថៃ។
+បើព័ត៌មានមិនគ្រប់គ្រាន់ សូមបញ្ជាក់ថាត្រូវរង់ចាំ និងប្រាប់ព័ត៌មានដែលនៅខ្វះ។
+ឧទាហរណ៍ពាក្យ៖ និន្នាការចុះ, ទិសដៅមិនស្របគ្នា, រង់ចាំទៀនបិទ,
+តម្លៃត្រឡប់មកតេស្ត, កម្រិតឈប់ខាត, ពេលវេលានៃរូបក្រាហ្វ។'''
+
+
+def is_khmer_review(review):
+    """Reject mixed-script prose instead of deleting letters and corrupting words."""
+    prose = [review['reason_km'], *review['risks_km'], *review['missing_data']]
+    def allowed(value):
+        if not re.search(r'[\u1780-\u17a2]', value) or re.search(r'[\u0e00-\u0e7f]', value):
+            return False
+        for char in value:
+            if unicodedata.category(char)[0] in 'LMN' and not (
+                    '\u1780' <= char <= '\u17ff' or char.isascii()):
+                return False
+        return True
+    return all(allowed(value) for value in prose)
 
 
 def api_key():
@@ -94,6 +123,20 @@ def review_with_gemini(snapshot):
 
 
 def generate_review(parts, system_rules):
+    rules = system_rules + '\n' + KHMER_RULES
+    for attempt in range(2):
+        review = generate_once(parts, rules)
+        if is_khmer_review(review):
+            return review
+        # Regenerate from original evidence; do not show or strip the mixed text.
+        rules += ('\nThe previous answer failed Khmer language validation. Reconsider the original '
+                  'evidence and write all prose again in short Khmer sentences with ZERO Thai '
+                  'characters. Use Khmer script and ASCII technical labels only, with no '
+                  'other alphabet. Preserve uncertainty and do not invent additional facts.')
+    raise RuntimeError('gemini_language_mismatch')
+
+
+def generate_once(parts, system_rules):
     key = api_key()
     if not key:
         raise RuntimeError('gemini_key_missing')
@@ -189,7 +232,7 @@ class ReviewBridge:
             status = 'reviewed'
         except Exception as error:
             code = str(error)
-            allowed = ('gemini_http_400', 'gemini_http_401', 'gemini_http_403', 'gemini_http_404', 'gemini_http_429', 'gemini_http_500', 'gemini_http_503', 'gemini_unavailable', 'gemini_key_missing', 'gemini_invalid_response', 'stale_or_future_candle')
+            allowed = ('gemini_http_400', 'gemini_http_401', 'gemini_http_403', 'gemini_http_404', 'gemini_http_429', 'gemini_http_500', 'gemini_http_503', 'gemini_unavailable', 'gemini_key_missing', 'gemini_invalid_response', 'gemini_language_mismatch', 'stale_or_future_candle')
             result = {'ai_status': 'unavailable', 'verdict': 'WAIT', 'error': code if code in allowed else 'review_failed', 'win_probability': None, 'affects_pine_backtest': False, 'places_orders': False}
             status = 'failed'
         with self.db() as db:

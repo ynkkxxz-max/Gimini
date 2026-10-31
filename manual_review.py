@@ -147,7 +147,8 @@ class ManualJobs:
                     code = str(error)
                     if code not in ('gemini_key_missing', 'gemini_unavailable', 'gemini_invalid_response',
                                     'gemini_http_400', 'gemini_http_401', 'gemini_http_403', 'gemini_http_404',
-                                    'gemini_http_429', 'gemini_http_500', 'gemini_http_503'):
+                                    'gemini_http_429', 'gemini_http_500', 'gemini_http_503',
+                                    'gemini_language_mismatch'):
                         code = 'review_failed'
                     review = {'ai_status': 'unavailable', 'verdict': 'WAIT', 'error': code, 'win_probability': None}
                     state = 'failed'

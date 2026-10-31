@@ -20,6 +20,19 @@ def response(review):
 
 
 class KhmerOutputTests(unittest.TestCase):
+    def test_language_repair_cannot_change_signal_evidence_or_history(self):
+        from signal_review import MANUAL_SCHEMA
+        original = dict(VALID, reason_km=VALID['reason_km'] + ' ลง',
+                        setup={'direction': 'SELL', 'entry_confirmed': False},
+                        historical={'visible': True, 'closed_trades': 5, 'reported_win_rate': 20})
+        with patch.dict(os.environ, {'GEMINI_API_KEY': 'test-key'}), patch.object(
+                bridge.urllib.request, 'urlopen', side_effect=[response(original), response(VALID)]) as send:
+            result = bridge.generate_review([{'text': 'synthetic'}], 'Review evidence only.', response_schema=MANUAL_SCHEMA)
+        self.assertEqual(result['setup'], original['setup'])
+        self.assertEqual(result['historical'], original['historical'])
+        editing = json.loads(send.call_args_list[1].args[0].data)
+        self.assertNotIn('historical', editing['generationConfig']['responseSchema']['required'])
+
     def test_checks_every_prose_field_for_thai_characters(self):
         for field in ('reason_km', 'risks_km', 'missing_data'):
             with self.subTest(field=field):

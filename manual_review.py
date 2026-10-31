@@ -12,6 +12,7 @@ from http.cookies import SimpleCookie
 from pathlib import Path
 
 from tradingview_gemini_bridge import api_key, generate_review, send_json, webhook_token
+from signal_review import DEFAULT_MIN_TRADES, DEFAULT_MIN_WIN_RATE, MANUAL_SCHEMA, SIGNAL_RULES, screen_signal
 
 SESSION_SECONDS = 8 * 3600
 MAX_IMAGE = 5 * 1024 * 1024
@@ -43,6 +44,12 @@ def valid_manual_input(data):
         raise ValueError('invalid_input')
     clean = {'timeframe': timeframe, 'proposed_direction': direction,
              'user_context': context.strip(), 'user_chart_time_utc7': data_time.strip() or 'not supplied'}
+    minimum_rate = data.get('min_win_rate', DEFAULT_MIN_WIN_RATE)
+    minimum_trades = data.get('min_closed_trades', DEFAULT_MIN_TRADES)
+    if (type(minimum_rate) not in (int, float) or not math.isfinite(minimum_rate) or not 0 <= minimum_rate <= 100 or
+            type(minimum_trades) is not int or not 1 <= minimum_trades <= 1000000):
+        raise ValueError('invalid_input')
+    clean.update(min_win_rate=minimum_rate, min_closed_trades=minimum_trades)
     price = data.get('price')
     if price not in ('', None):
         if type(price) not in (int, float) or not math.isfinite(price) or not 0 < price < 1000000:
@@ -79,7 +86,8 @@ def analyze_manual(data):
     parts = [{'text': 'Manual XAUUSD setup review. Supplied data: ' + json.dumps(context, ensure_ascii=False)}]
     if image:
         parts.append({'inlineData': {'mimeType': image['mime'], 'data': image['data']}})
-    return generate_review(parts, MANUAL_SYSTEM)
+    review = generate_review(parts, MANUAL_SYSTEM + '\n' + SIGNAL_RULES, response_schema=MANUAL_SCHEMA)
+    return {**review, **screen_signal(review, data)}
 
 
 def new_session():
